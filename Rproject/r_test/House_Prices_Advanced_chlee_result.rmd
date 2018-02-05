@@ -1,0 +1,857 @@
+---
+title: "House Price Advanced Regression_Ensemble"
+author: "이춘호"
+date: "2017년 10월 28일"
+output: html_document
+---
+
+---
+
+## House Price Advanced Regression_Ensemble 순서
+  * kaggle - https://www.kaggle.com/c/house-prices-advanced-regression-techniques
+
+#### 1. 데이터 클린징(09/09 ~ 09/23) : 참고할 Kernel 선정하여 개별 파악 후 결과 공유
+  * 참고 - http://hamelg.blogspot.kr/2016/09/kaggle-home-price-prediction-tutorial.html
+
+#### 2. 학습을 위해 데이터 타입 변경
+
+#### 3. 알고리즘별 최적화(09/24 ~ 10/14) : 예측 모델에 적용하고 싶은 알고리즘 파악 및 진행 결과 공유
+  * 데이터 사용
+	  + Train data : 제공된 train data의 70% 사용 / Validation data : 제공된 train data의 30% 사용 -> 알고리즘별로 가장 적은 RSME 파악에 사용
+	  + Test data : 제공된 test data 사용
+  * XGBoost
+  * GBM
+  * LASSO
+  * RandomForest
+
+#### 4. Ensemble(10/15 ~ 10/28) : 알고리즘 결과 취합 및 앙상블 모델 적용 
+
+---
+
+## 1. 데이터 클린징
+* 데이터 준비
+* 전처리가 끝난 train 과 test 데이터를 불러온다.
+
+```{r}
+x.train <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/train_eda.csv")
+
+x.test <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/test_eda.csv")
+
+x.train <- x.train[, -1]
+x.test <- x.test[, -1]
+```
+
+* train data 파악
+* int, factor, num 형태로 존재
+
+```{r}
+str(x.train)
+```
+
+* test data 파악
+
+```{r}
+str(x.test)
+```
+
+---
+
+## 2. 학습을 위해 데이터 타입 변경
+* 학습에 사용될 알고리즘 : GBM, RandomForest
+* train, test factor level 맞춰 재생성
+
+```{r warning=FALSE}
+if (!require("dplyr")) { install.packages("dplyr") }
+
+SalePrice <- x.train[, 82]
+
+train_df_model <- x.train[, 1:81]
+test_df <- x.test
+test_id <- c(1461:2919)
+
+train_test <- bind_rows(train_df_model, test_df) ## 합치면서 character 컬럼이 생김
+ntrain <- nrow(train_df_model)
+
+features <- names(x.train)
+
+#convert character into factor : character 컬럼 factor 수정
+for (f in features) {
+    if (is.character(train_test[[f]])) {
+        levels = sort(unique(train_test[[f]]))
+        train_test[[f]] = as.integer(factor(train_test[[f]], levels = levels))
+    }
+}
+
+#splitting whole data back again
+train_x <- train_test %>% .[1:ntrain,]
+test_x <- train_test %>% .[(ntrain + 1):nrow(train_test),]
+
+train_xy <- cbind(train_x, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_xy$SalePrice, p = 0.7, list = FALSE)
+Training_xy <- train_xy[inTrain, ]
+Validation_xy <- train_xy[-inTrain, ]
+```
+
+* 학습에 사용될 알고리즘 : XGBoost, LASSO, Keras(tensorflow)
+	+ tensorflow를 돌리기 위해선 factor(이산형 변수)의 타입을 수정해야 한다. 방법은 2가지가 있다. 이산형 변수 속성별로 컬럼을 생성하여 "1,0" 값으로 추가하는 방식 과 이산형 변수의 관측치(level) 값으로 변경하는 방식이 있다.
+	+ 수정 작업은 factor level 값으로 대체하는 방식을 택하였다. 
+* train, test factor level 맞춰 재생성
+
+```{r warning=FALSE}
+## factor에서 numeric 변경 : Keras
+train_test_double <- train_test
+
+for (f in features) {
+    if (is.factor(train_test_double[[f]])) {
+        levels = sort(unique(train_test_double[[f]]))
+        train_test_double[[f]] = as.numeric(train_test_double[[f]], levels = levels)
+    }
+}
+
+#splitting whole data back again
+X_train <- train_test_double %>% .[1:ntrain,]
+X_test <- train_test_double %>% .[(ntrain + 1):nrow(train_test_double),]
+
+train_XY <- cbind(X_train, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_XY$SalePrice, p = 0.7, list = FALSE)
+Training_XY <- train_XY[inTrain, ]
+Validation_XY <- train_XY[-inTrain, ]
+```
+
+---
+
+## 3. 알고리즘별 최적화 : XGBoost
+
+```{r}
+if (!require("xgboost")) { install.packages("xgboost") }
+if (!require("Metrics")) { install.packages("Metrics") }
+```
+
+####  Hyper Parameters : XGBoost
+* 참고 - https://datascience.stackexchange.com/questions/9364/hypertuning-xgboost-parameters
+
+```{r}
+searchGridSubCol <- expand.grid(subsample = seq(0.5, 0.6, by = 0.01),
+								colsample_bytree = 0.7,
+								ntrees = 2800,
+								min_child_weight = seq(1.5, 2, by = 0.01),
+								gamma = seq(0.0, 0.1, by = 0.01))
+
+head(searchGridSubCol)
+```
+
+##### Hyper Parameters 중 Validation data의 "RMSE" 가장 낮은 값을 예측 모델에 적용
+* XGboost Hyper Parameter 세부 페이지(업데이트 예정) - https://bevislee.github.io/kaggleHousePrice/hyper_xgb.html
+
+```{r}
+##       i     rmse currentSubsampleRate currentColsampleRate ntreesNummin_child_weight_num gamma_num
+## 1     1 21194.13                 0.50                  0.7      2800              1.50      0.00
+## 2     2 21129.35                 0.51                  0.7      2800              1.50      0.00
+## 3     6 21102.40                 0.55                  0.7      2800              1.50      0.00
+## 4    35 21073.59                 0.51                  0.7      2800              1.53      0.00
+## 5    41 21068.08                 0.57                  0.7      2800              1.53      0.00
+## 6    46 21043.84                 0.51                  0.7      2800              1.54      0.00
+## 7    47 20924.94                 0.52                  0.7      2800              1.54      0.00
+## 8   112 20683.03                 0.51                  0.7      2800              1.60      0.00
+## 9  1266 20642.76                 0.50                  0.7      2800              1.63      0.02
+## 10 3258 20629.29                 0.51                  0.7      2800              1.91      0.05
+```
+
+##### Validation 예측 실행
+
+```{r}
+dtrain <- xgb.DMatrix(as.matrix(Training_XY[, -82]), label = Training_XY$SalePrice)
+
+xgboostModelCV <- xgboost(data = dtrain, nfold = 5, showsd = TRUE,
+			   metrics = "rmse", verbose = FALSE, "eval_metric" = "rmse",
+			   "objective" = "reg:linear", "max.depth" = 6, "eta" = 0.01,
+			   "subsample" = 0.2,
+			   "colsample_bytree" = 0.2,
+			   nrounds = 2200, 
+			   min_child_weight = 1.5,
+			   gamma = 0.0,
+			   nthread = 8, booster = "gbtree")
+
+## Predictions
+preds_train_xgb <- predict(xgboostModelCV, newdata = as.matrix(Validation_XY[, -82]))
+
+#Save rmse of the last iteration
+rmse_xgb <- rmse(Validation_XY$SalePrice, preds_train_xgb)
+
+rmse_xgb
+```
+
+##### Test 예측 실행
+
+```{r}
+Dtrain <- xgb.DMatrix(as.matrix(X_train), label = SalePrice)
+dtest <- xgb.DMatrix(as.matrix(X_test))
+
+bst <- xgboost(data = Dtrain, nfold = 5, showsd = TRUE,
+			   metrics = "rmse", verbose = FALSE, "eval_metric" = "rmse",
+			   "objective" = "reg:linear", "max.depth" = 6, "eta" = 0.01,
+			   "subsample" = 0.2,
+			   "colsample_bytree" = 0.2,
+			   nrounds = 2200, 
+			   min_child_weight = 1.5,
+			   gamma = 0.0,
+			   nthread = 8, booster = "gbtree")
+
+### prediction result save
+pred <- data.frame(test_id, preds_test_xgb <- predict(bst, dtest))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.12215
+
+---
+
+## 3. 알고리즘별 최적화 : GBM
+
+```{r}
+if (!require("gbm")) { install.packages("gbm") }
+if (!require("Metrics")) { install.packages("Metrics") }
+```
+
+##  Hyper Parameters : Build a GBM object
+* 참고 - https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-using-r
+* 참고 - https://www.analyticsvidhya.com/blog/2016/02/complete-guide-parameter-tuning-gradient-boosting-gbm-python/
+* https://www.rdocumentation.org/packages/gbm/versions/2.1.1/topics/gbm
+
+#### 구간 설정
+
+* n.trees : number of trees
+* shrinkage : shrinkage or learning rate, 0.001 to 0.1 usually work
+* n.minobsinnode : minimum total weight needed in each node
+* interaction.depth : 1: additive model, 2: two-way interactions, etc.
+
+```{r}
+searchGridSubCol <- expand.grid(ntreesNum = seq(500, 3000, by = 100),
+								shrinkage_num = 0.01, # seq(0.001, 0.01, by = 0.001)
+								n.minobsinnode_num = 20,
+								interaction.depth_num = seq(49, 1, by = -1)) # interaction.depth must be less than 50
+
+head(searchGridSubCol)
+```
+
+##### Hyper Parameters 중 Validation data의 "RMSE" 가장 낮은 값을 예측 모델에 적용
+* GBM Hyper Parameter 세부 페이지(업데이트 예정) - https://bevislee.github.io/kaggleHousePrice/hyper_gbm.html
+
+* Hyper Parameter 결과
+
+```{r}
+# ntrees : 2000 / shrinkage : 0.05 / n.minobsinnode : 10 / interaction.depth : 5 / rmse : 25048.87 -> LB : 0.12840
+# ntrees : 1600 / shrinkage : 0.01 / n.minobsinnode : 20 / interaction.depth : 10 / rmse : 25048.87 -> LB : 0.12655
+```
+
+##### Validation 예측 실행
+
+```{r}
+ntreesNum <- 1600
+shrinkage_num <- 0.01
+n.minobsinnode_num <- 20
+interaction.depth_num <- 10 
+
+gbmModel <- gbm(formula = SalePrice ~.,
+			          data = Training_xy,
+			          n.trees = ntreesNum, # number of trees
+			          shrinkage = shrinkage_num, # shrinkage or learning rate, 0.001 to 0.1 usually work
+					  n.minobsinnode = n.minobsinnode_num, # minimum total weight needed in each node
+				   interaction.depth = interaction.depth_num, # 1: additive model, 2: two-way interactions, etc.
+			          cv.folds = 5,
+			          distribution = "gaussian") # 5-fold cross-validation
+
+## Predictions
+preds_train_gbm <- predict(object = gbmModel, newdata = Validation_xy[,-82], n.trees = ntreesNum)
+
+#Save rmse of the last iteration
+rmse_gbm <- rmse(Validation_xy$SalePrice, preds_train_gbm)
+
+rmse_gbm
+```
+
+##### Test 예측 실행
+
+```{r}
+ntreesNum <- 1600
+shrinkage_num <- 0.01
+n.minobsinnode_num <- 20
+interaction.depth_num <- 10
+
+gbmModel = gbm(formula = SalePrice ~ .,
+			   data = train_xy,
+			   n.trees = ntreesNum, # number of trees
+			   shrinkage = shrinkage_num, # shrinkage or learning rate, 0.001 to 0.1 usually work
+			   n.minobsinnode = n.minobsinnode_num, # minimum total weight needed in each node
+			   interaction.depth = interaction.depth_num, # 1: additive model, 2: two-way interactions, etc.
+			   cv.folds = 5,
+			   distribution = "gaussian") # 5-fold cross-validation
+
+### prediction_train all result save
+pred <- data.frame(test_id, preds_test_gbm <- predict(object = gbmModel, newdata = test_x, n.trees = ntreesNum))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.12655
+
+---
+
+## 3. 알고리즘별 최적화 : LASSO
+
+```{r}
+if (!require("glmnet")) { install.packages("glmnet") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+set.seed(123)
+```
+
+#### LASSO는 Hyper Parameter에 대한 자료가 없어, R 패키지 가이드 및 Fuction 설명 확인 후 수정값을 임의로 결정하여 진행
+
+* 초기값 RMSE
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* nfold - 3 : nfold는 3보다 커야함
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, nfolds = 3, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* nfold - 10
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, nfolds = 10, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* 결과
+
+```{r}
+# 기본 : 31535.93
+# nfold - 3 추가 : 31846.18
+# nfold - 10 추가 : 31237.45
+```
+
+#### nfold가 10일때 "RMSE"가 낮으므로, 10으로 고정하고, alpha 값 탐색
+
+```{r}
+alpha = seq(0, 1, by = 0.00001)
+
+head(alpha)
+```
+
+#### Hyper Parameters 중 Validation data의 "RMSE" 가장 낮은 값을 예측 모델에 적용
+* LASSO Hyper Parameter 세부 페이지(업데이트 예정) - https://bevislee.github.io/kaggleHousePrice/hyper_lasso.html
+
+* Hyper Parameter 결과
+
+```{r}
+# rmse alpha_num
+# 29961.57         0
+# 29771.29     1e-05
+# 29089.44     3e-05
+# 29038.22   0.00012
+```
+
+##### Validation 예측 실행
+
+```{r}
+alpha_num = 0.00012
+
+lasso_fit <- cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, alpha = alpha_num, nfolds = 10, type.measure = "mse")
+
+## Predictions
+preds_train_lasso <- predict(lasso_fit, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+#Save rmse of the last iteration
+rmse_lasso <- rmse(Validation_XY$SalePrice, preds_train_lasso)
+
+rmse_lasso
+```
+
+##### Test 예측 실행
+
+```{r}
+alpha_num = 0.00012
+cv_lasso = cv.glmnet(as.matrix(X_train), SalePrice, alpha = alpha_num, nfolds = 10, type.measure = "mse")
+
+### prediction result save
+pred <- data.frame(test_id, preds_test_lasso <- predict(cv_lasso, newx = as.matrix(X_test), s = "lambda.min"))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.15485
+
+---
+
+## 3. 알고리즘별 최적화 : RandomForest
+
+```{r}
+if (!require("randomForest")) { install.packages("randomForest") }
+if (!require("caret")) { install.packages("caret") }
+if (!require("Metrics")) { install.packages("Metrics") }
+```
+
+####  Hyper Parameters : RandomForest
+
+* 참고 - https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+
+#### 구간 설정
+
+```{r}
+searchGridSubCol <- expand.grid(mtry_num = seq(30, 1, by = -1),
+								ntree = seq(3000, 100, by = -100))
+
+head(searchGridSubCol)
+```
+
+##### Hyper Parameters 중 Validation data의 "RMSE" 가장 낮은 값을 예측 모델에 적용
+* RF Hyper Parameter 세부 페이지(업데이트 예정) - https://bevislee.github.io/kaggleHousePrice/hyper_rf.html
+
+* Hyper Parameter 결과
+
+```{r}
+# mtry : 5 / ntree : 500 / rmse : 33889.03 -> LB : 0.16743
+# mtry : 29 / ntree : 1200 / rmse : 28184.84 -> LB : 0.14645
+# mtry : 31 / ntree : 1000 / rmse : 25657.48 -> LB : 0.14595
+# mtry : 28 / ntree : 800 / rmse : 24316.66 -> LB : 0.14295
+# mtry : 21 / ntree : 99 / rmse : 23701.38 -> LB : 0.14523
+# mtry : 24 / ntree : 87 / rmse : 23260.80 -> LB : 0.14424
+```
+
+##### Validation 예측 실행
+
+```{r}
+mtry_num <- 28
+ntree_num <- 800
+
+rf_fit <- randomForest(SalePrice ~ ., data = Training_xy, mtry = mtry_num, ntree = ntree_num)
+
+## Predictions
+preds_train_rf <- predict(rf_fit, newdata = Validation_xy[,-82])
+
+#Save rmse of the last iteration
+rmse_rf <- rmse(Validation_xy$SalePrice, preds_train_rf)
+
+rmse_rf
+```
+
+##### Test 예측 실행
+
+```{r}
+mtry_num <- 28
+ntree_num <- 800
+
+rf_model <- randomForest(SalePrice ~ ., data = train_xy, mtry = mtry_num, ntree = ntree_num)
+
+pred <- data.frame(test_id, preds_test_rf <- predict(rf_model, test_x))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.14295
+
+---
+
+## 4. Ensemble
+#### Ensemble 적용 절차
+
+1. Validataion data의 예측값에 적용할 알고리즘 예측값의 평균을 적용하여 LB Score 파악 (전체)
+
+2. 알고리즘별로 Train data를 통해 최적의 파라미터로 학습되고, Validataion data의 예측값과 실제값의 "RMSE"가 가장 낮게 나오는 비율을 탐색하여 그 비율을 Test data의 예측값에 동일하게 적용하여 LB Score 파악 (전체 -> XGBoost + GBM)
+
+3. Tensorflow를 이용한 앙상블 적용 (전체 -> XGBoost + GBM)
+
+4. 알고리즘별 LB Score에 맞춰 사용자가 가중치 비율을 설정하여 Test data의 예측값에 적용하여 LB Score 파악 (XGBoost + GBM)
+
+####  1. 알고리즘 Validation Data 예측 평균 적용
+
+```{r}
+rmse_ensemble_1 <- rmse(Validation_xy$SalePrice, (preds_train_xgb + preds_train_gbm + preds_train_lasso + preds_train_rf) / 4)
+
+rmse_ensemble_1
+```
+
+* 평균 적용하여 Test 예측값 추출
+
+```{r}
+pred <- data.frame(Id = test_id,
+				   ProbabilityXGB = preds_test_xgb,
+				   ProbabilityGBM = preds_test_gbm,
+				   ProbabilityLASSO = preds_test_lasso,
+				   ProbabilityRF = preds_test_rf)
+
+colnames(pred) <- c("Id", "ProbabilityXGB", "ProbabilityGBM", "ProbabilityLASSO", "ProbabilityRF")
+
+pred$Probability <- (pred$ProbabilityXGB + pred$ProbabilityGBM + pred$ProbabilityLASSO + pred$ProbabilityRF)/4
+
+pred <- pred %>% dplyr::select(Id, Probability)
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.69928
+
+####  2. 알고리즘 Validation Data RSME 최소값인 최소 비율 적용(전체)
+
+```{r}
+# RMSE score for Weighted Average of the All models
+RMSE_Weighted <- expand.grid(xgb_num = seq(0.1, 0.99, by = 0.01),
+							 gbm_num = seq(0.1, 0.99, by = 0.01),
+							 rf_num = seq(0.1, 0.99, by = 0.01),
+							 lasso_num = seq(0.1, 0.99, by = 0.01))
+
+sum <- rowSums(RMSE_Weighted)
+RMSE_Weighted <- cbind(RMSE_Weighted, sum)
+
+RMSE_Weighted <- RMSE_Weighted[RMSE_Weighted$sum == 1.0,]
+
+RMSE_Weighted_score <- data.frame()
+for (i in 1:nrow(RMSE_Weighted)) {
+	xgb_num <- RMSE_Weighted[i, 1]
+	gbm_num <- RMSE_Weighted[i, 2]
+	lasso_num <- RMSE_Weighted[i, 3]
+	rf_num <- RMSE_Weighted[i, 4]
+
+	rmse <- rmse(Validation_xy$SalePrice, (xgb_num * preds_train_gbm + gbm_num * preds_train_xgb + lasso_num * preds_train_lasso + rf_num * preds_train_rf))
+
+	RMSE_Weighted_score_1 <- data.frame(rmse, xgb_num, gbm_num, lasso_num, rf_num) 
+	RMSE_Weighted_score <- rbind(RMSE_Weighted_score, RMSE_Weighted_score_1)
+}
+
+RMSE_Weighted_score <- RMSE_Weighted_score[c(order(RMSE_Weighted_score$rmse)),]
+
+rmse_ensemble_2A <- RMSE_Weighted_score[1, 1]
+
+rmse_ensemble_2A
+```
+
+* RMSE 최소 비율 적용하여 Test 예측값 추출
+
+```{r}
+head(RMSE_Weighted_score)
+
+xgb_num <- RMSE_Weighted_score[1, 2]
+gbm_num <- RMSE_Weighted_score[1, 3]
+lasso_num <- RMSE_Weighted_score[1, 4]
+rf_num <- RMSE_Weighted_score[1, 5]
+
+
+pred <- data.frame(Id = test_id,
+				   ProbabilityXGB = preds_test_xgb,
+				   ProbabilityGBM = preds_test_gbm,
+				   ProbabilityLASSO = preds_test_lasso,
+				   ProbabilityRF = preds_test_rf)
+
+colnames(pred) <- c("Id", "ProbabilityXGB", "ProbabilityGBM", "ProbabilityLASSO", "ProbabilityRF")
+
+pred$Probability <- ((pred$ProbabilityXGB) * xgb_num + (pred$ProbabilityGBM) * gbm_num + (pred$ProbabilityLASSO) * lasso_num + (pred$ProbabilityRF) * rf_num)
+
+pred <- pred %>% dplyr::select(Id, Probability)
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.12218
+
+####  2. 알고리즘 Validation Data RSME 최소값인 최소 비율 적용(XGBoost + GBM)
+
+```{r}
+# RMSE score for Weighted Average of the All models
+RMSE_Weighted <- expand.grid(xgb_num = seq(0.1, 0.99, by = 0.01),
+							 gbm_num = seq(0.1, 0.99, by = 0.01))
+
+sum <- rowSums(RMSE_Weighted)
+RMSE_Weighted <- cbind(RMSE_Weighted, sum)
+
+RMSE_Weighted <- RMSE_Weighted[RMSE_Weighted$sum == 1.0,]
+
+RMSE_Weighted_score <- data.frame()
+for (i in 1:nrow(RMSE_Weighted)) {
+	xgb_num <- RMSE_Weighted[i, 1]
+	gbm_num <- RMSE_Weighted[i, 2]
+
+	rmse <- rmse(Validation_xy$SalePrice, (xgb_num * preds_train_gbm + gbm_num * preds_train_xgb))
+
+	RMSE_Weighted_score_1 <- data.frame(rmse, xgb_num, gbm_num) 
+	RMSE_Weighted_score <- rbind(RMSE_Weighted_score, RMSE_Weighted_score_1)
+}
+
+RMSE_Weighted_score <- RMSE_Weighted_score[c(order(RMSE_Weighted_score$rmse)),]
+
+rmse_ensemble_22 <- RMSE_Weighted_score[1, 1]
+
+rmse_ensemble_22
+```
+
+* RMSE 최소 비율 적용하여 Test 예측값 추출
+
+```{r}
+head(RMSE_Weighted_score)
+
+xgb_num <- RMSE_Weighted_score[1, 2]
+gbm_num <- RMSE_Weighted_score[1, 3]
+
+pred <- data.frame(Id = test_id,
+				   ProbabilityXGB = preds_test_xgb,
+				   ProbabilityGBM = preds_test_gbm)
+
+colnames(pred) <- c("Id", "ProbabilityXGB", "ProbabilityGBM")
+
+pred$Probability <- ((pred$ProbabilityXGB) * xgb_num + (pred$ProbabilityGBM) * gbm_num)
+
+pred <- pred %>% dplyr::select(Id, Probability)
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.12188
+
+#### 3. Tensorflow를 이용한 앙상블 (XGBoost + GBM)
+
+##### 학습 데이터 생성
+
+* 참고
+	+ python 참고 - https://www.kaggle.com/einstalek/blending-with-tensorflow-0-11417-on-lb/notebook
+	+ R-tensorflow 참고 - http://cinema4dr12.tistory.com/1155
+
+* xgboost 학습 데이터 생성
+
+```{r}
+### xgboost
+if (!require("xgboost")) { install.packages("xgboost") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+Dtrain <- xgb.DMatrix(as.matrix(X_train), label = SalePrice)
+dtest <- xgb.DMatrix(as.matrix(X_test))
+
+model_xgb <- xgboost(data = Dtrain, nfold = 5, showsd = TRUE,
+			   metrics = "rmse", verbose = FALSE, "eval_metric" = "rmse",
+			   "objective" = "reg:linear", "max.depth" = 6, "eta" = 0.01,
+			   "subsample" = 0.2,
+			   "colsample_bytree" = 0.2,
+			   nrounds = 2200,
+			   gamma = 0.0,
+			   min_child_weight = 1.5,
+			   nthread = 8, booster = "gbtree")
+
+pred_train_xgb <- log(predict(model_xgb, Dtrain))
+pred_test_xgb <- log(predict(model_xgb, dtest))
+```
+
+* GBM 학습 데이터 생성
+
+```{r}
+### GBM
+if (!require("gbm")) { install.packages("gbm") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+ntreesNum <-  1600
+shrinkage_num <- 0.01
+n.minobsinnode_num <- 20 
+interaction.depth_num <- 10
+
+gbmModel = gbm(formula = SalePrice ~ .,
+			   data = train_XY,
+			   n.trees = ntreesNum, # number of trees
+			   shrinkage = shrinkage_num, # shrinkage or learning rate, 0.001 to 0.1 usually work
+			   n.minobsinnode = n.minobsinnode_num, # minimum total weight needed in each node
+			   interaction.depth = interaction.depth_num, # 1: additive model, 2: two-way interactions, etc.
+			   cv.folds = 5, # 5-fold cross-validation
+			   distribution = "gaussian")
+
+pred_train_gbm <- log(predict(gbmModel, train_XY))
+pred_test_gbm <- log(predict(gbmModel, X_test))
+```
+
+* LASSO 학습 데이터 생성
+
+```{r}
+### LASSO
+if (!require("glmnet")) { install.packages("glmnet") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+set.seed(123)
+cv_lasso = cv.glmnet(as.matrix(X_train), SalePrice, alpha = 0.00012, nfolds = 10, type.measure = "mse")
+
+pred_train_lasso <- log(predict(cv_lasso, newx = as.matrix(X_train),
+	s = "lambda.min"))
+pred_test_lasso <- log(predict(cv_lasso, newx = as.matrix(X_test),
+	s = "lambda.min"))
+```
+
+* RandomForest 학습 데이터 생성
+
+```{r}
+### RandomForest
+if (!require("randomForest")) { install.packages("randomForest") }
+if (!require("caret")) { install.packages("caret") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+mtry_num <- 28
+ntree_num <- 800
+
+rf_model <- randomForest(SalePrice ~ ., data = train_XY, mtry = mtry_num, ntree = ntree_num)
+
+pred_train_rf <- log(predict(rf_model, train_XY))
+pred_test_rf <- log(predict(rf_model, X_test))
+```
+
+##### Tensor Ensemble 
+
+```{r}
+if (!require("reticulate")) { install.packages("reticulate") }
+if (!require("tensorflow")) { install.packages("tensorflow") }
+
+np <- import("numpy")
+
+# Training Data
+pred_train <- data.frame(pred_train_xgb, pred_train_gbm)
+# pred_train <- data.frame(pred_train_xgb, pred_train_lasso, pred_train_gbm, pred_train_rf)
+preds_train = np$array(as.matrix(pred_train))
+
+SalePrice <- log(SalePrice)
+actual_price = np$array(as.matrix(data.frame(SalePrice)))
+
+n_x = nrow(preds_train)
+m = ncol(preds_train)
+
+P <- tf$placeholder(tf$float32, name = "Preds", shape = list(n_x, m))
+Y <- tf$placeholder(tf$float32, name = "Price", shape = list(n_x, 1))
+A <- tf$get_variable(name = "Params", dtype = tf$float32,
+						 initializer = tf$constant(np$array(matrix(c(1:m), ncol = 1, nrow = m)), dtype = tf$float32))
+
+# loss
+prediction <- tf$matmul(P, A) / tf$reduce_sum(A)
+lmbda = 0.8
+loss = tf$reduce_mean(tf$squared_difference(prediction, Y)) + lmbda * tf$reduce_mean(tf$abs(A))
+
+# optimizer
+optimizer = tf$train$GradientDescentOptimizer(learning_rate = 0.01)$minimize(loss)
+
+init = tf$global_variables_initializer()
+
+# Launch the default graph.
+sess <- tf$Session()
+
+# Fit all training data
+num_iterations = 700
+
+costs1 <- data.frame()
+## tensorflow loss tuning
+with(tf$Session() %as% sess, {
+	# initialize global variables
+	for (i in (0:num_iterations)) {
+		sess$run(init)
+		current_cost_optimizer = sess$run(optimizer, feed_dict = dict(P = preds_train, Y = actual_price))
+		current_cost_loss = sess$run(loss, feed_dict = dict(P = preds_train, Y = actual_price))
+		costs1 <- current_cost_loss
+		print(i)
+		print(current_cost_loss)
+	}
+	parameters = sess$run(A)
+	print(parameters)
+})
+
+params <- np$array(as.matrix(parameters))
+
+pred_test <- data.frame(pred_test_xgb, pred_test_gbm)
+# pred_test <- data.frame(pred_test_xgb, pred_test_lasso, pred_test_gbm, pred_test_rf)
+preds_test = np$array(as.matrix(pred_test))
+
+op <- data.frame()
+for (i in 1:nrow(pred_test)) {
+	a = sum(pred_test[i,] * params)
+	op <- rbind(op, a[1])
+}
+
+op = np$array(as.matrix(op))
+
+WAP = np$squeeze(op / np$sum(params))
+
+WAP <- exp(WAP)
+
+test_id <- c(1461:2919)
+
+ensemble_pred <- data.frame(test_id, WAP)
+colnames(ensemble_pred) <- c("Id", "SalePrice")
+
+head(ensemble_pred)
+```
+
+* LB Score : 0.12123
+
+####  4. 알고리즘별 LB Score 기준 사용자 비율 적용
+
+```{r}
+xgb_num <- 0.64
+gbm_num <- 0.36
+
+pred <- data.frame(Id = test_id,
+				   ProbabilityXGB = preds_test_xgb,
+				   ProbabilityGBM = preds_test_gbm)
+
+colnames(pred) <- c("Id", "ProbabilityXGB", "ProbabilityGBM")
+
+pred$Probability <- ((pred$ProbabilityXGB) * xgb_num + (pred$ProbabilityGBM) * gbm_num)
+
+pred <- pred %>% dplyr::select(Id, Probability)
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
+
+* LB Score : 0.12107
+
+## 최종 LB Score : 0.12107
+
+---
+
+## 결론
+
+##### LB Score 결과
+* 1st : 알고리즘별 LB Score 기준 사용자 비율 적용
+* 2nd : Tensorflow를 이용한 앙상블
+* 3rd : 알고리즘 Validation Data RSME 최소값인 비율 적용
+* 4th : 알고리즘 Validation Data 예측 평균 적용
+
+##### 여러 알고리즘 보다는 LB Score가 높은 알고리즘만으로 앙상블 적용했을 때 더 높은 Rank 기록
+
+##### 알고리즘에 대한 학습 및 적용 방법에 대해 좀 더 학습하여, 처음부터 끝까지 돌리는 Hyper Parameter Searching 보다는 어느정도 구간을 정하여 진행하는 쪽으로 해야함. (Searching 시간이 너무 길게 소요 / 평균 1~2일)
+
+---
+
+#### 기타 (업데이트 예정)
+* Keras - https://bevislee.github.io/kaggleHousePrice/hyper_keras.html
+* SVM - https://bevislee.github.io/kaggleHousePrice/hyper_svm.html

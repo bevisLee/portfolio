@@ -1,0 +1,177 @@
+---
+title: "House Price Advanced Regression Hyper Parameters GBM"
+author: "이춘호"
+date: "2017년 10월 28일"
+output: html_document
+---
+
+---
+## 1. 데이터 준비
+```{r}
+x.train <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/train_eda.csv")
+
+x.test <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/test_eda.csv")
+
+x.train <- x.train[, -1]
+x.test <- x.test[, -1]
+
+if (!require("dplyr")) { install.packages("dplyr") }
+
+SalePrice <- x.train[, 82]
+
+train_df_model <- x.train[, 1:81]
+test_df <- x.test
+test_id <- c(1461:2919)
+
+train_test <- bind_rows(train_df_model, test_df) ## 합치면서 character 컬럼이 생김
+ntrain <- nrow(train_df_model)
+
+features <- names(x.train)
+
+#convert character into factor : character 컬럼 factor 수정
+for (f in features) {
+	if (is.character(train_test[[f]])) {
+		levels = sort(unique(train_test[[f]]))
+		train_test[[f]] = as.integer(factor(train_test[[f]], levels = levels))
+	}
+}
+
+#splitting whole data back again
+train_x <- train_test %>% .[1:ntrain,]
+test_x <- train_test %>% .[(ntrain + 1):nrow(train_test),]
+
+train_xy <- cbind(train_x, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_xy$SalePrice, p = 0.7, list = FALSE)
+Training_xy <- train_xy[inTrain,]
+Validation_xy <- train_xy[-inTrain,]
+
+train_test_double <- train_test
+
+for (f in features) {
+	if (is.factor(train_test_double[[f]])) {
+		levels = sort(unique(train_test_double[[f]]))
+		train_test_double[[f]] = as.numeric(train_test_double[[f]], levels = levels)
+	}
+}
+
+#splitting whole data back again
+X_train <- train_test_double %>% .[1:ntrain,]
+X_test <- train_test_double %>% .[(ntrain + 1):nrow(train_test_double),]
+
+train_XY <- cbind(X_train, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_XY$SalePrice, p = 0.7, list = FALSE)
+Training_XY <- train_XY[inTrain,]
+Validation_XY <- train_XY[-inTrain,]
+```
+
+##  2. GBM Hyper Parameters
+
+```{r}
+if (!require("gbm")) { install.packages("gbm") }
+if (!require("Metrics")) { install.packages("Metrics") }
+```
+
+##  Hyper Parameters : Build a GBM object
+* 참고 - https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-using-r
+* 참고 - https://www.analyticsvidhya.com/blog/2016/02/complete-guide-parameter-tuning-gradient-boosting-gbm-python/
+* https://www.rdocumentation.org/packages/gbm/versions/2.1.1/topics/gbm
+
+#### 구간 설정
+
+* n.trees : number of trees
+* shrinkage : shrinkage or learning rate, 0.001 to 0.1 usually work
+* n.minobsinnode : minimum total weight needed in each node
+
+```{r}
+searchGridSubCol <- expand.grid(ntreesNum = seq(500, 3000, by = 100),
+								shrinkage_num = seq(0.001, 0.01, by = 0.001),
+								n.minobsinnode_num = seq(5, 20, by = 1),			           interaction.depth_num = seq(10, 1, by = -1)) # interaction.depth must be less than 50
+
+head(searchGridSubCol)
+```
+
+#### Hyper Parameter 탐색과정을 오래 걸리므로, slack과 같은 메신저와 연결하여, 완료되면 메시지 전송을 통해 이원화 작업을 추천
+
+* RMSE 최소 비교를 위해, 위에서 도출한 최소값을 입력하여, 그 보다 더 작은 RMSE 일때 저장하도록 설정
+
+```{r}
+rmseErrorsHyperparameters_gbm <- data.frame()
+rmse = 24000
+for (i in 1:nrow(searchGridSubCol)) {
+
+	#Extract Parameters to test
+	ntreesNum <- searchGridSubCol[i, 1]
+	shrinkage_num <- searchGridSubCol[i, 2]
+	n.minobsinnode_num <- searchGridSubCol[i, 3]
+	interaction.depth_num <- searchGridSubCol[i, 4]
+
+	gbmModel = gbm(formula = SalePrice ~ .,
+				   data = Training_xy,
+				   n.trees = ntreesNum, # number of trees
+				   shrinkage = shrinkage_num, # shrinkage or learning rate, 0.001 to 0.1 usually work
+				   n.minobsinnode = n.minobsinnode_num, # minimum total weight needed in each node
+				   interaction.depth = interaction.depth_num, # 1: additive model, 2: two-way interactions, etc.
+				   cv.folds = 5, # 5-fold cross-validation
+				   distribution = "gaussian")
+
+	## Predictions
+	preds_xgb = predict(object = gbmModel, newdata = Validation_xy, n.trees = ntreesNum)
+
+	#Save rmse of the last iteration
+	rmse1 <- rmse(Validation_xy$SalePrice, preds_xgb)
+	rmse <- min(rmse, rmse1)
+
+	print(i)
+	print(rmse1)
+
+	if (rmse == rmse1) {
+		rmseErrorsHyperparameters_gbm_1 <- data.frame(i, rmse1, ntreesNum, shrinkage_num, n.minobsinnode_num, interaction.depth_num)
+		colnames(rmseErrorsHyperparameters_gbm_1) <- c("i", "rmse", "ntreesNum", "shrinkage_num", "n.minobsinnode_num", "interaction.depth_num")
+		rmseErrorsHyperparameters_gbm <- rbind(rmseErrorsHyperparameters_gbm, rmseErrorsHyperparameters_gbm_1)
+		print(rmseErrorsHyperparameters_gbm_1)
+	}
+}
+
+tail(rmseErrorsHyperparameters_gbm, 5)
+```
+
+* 결과
+	+ interaction.depth를 늘려 RMSE를 낮췄으나, LB Score는 증가하여, LB 스코어 기준으로 높은 값을 사용
+```{r}
+# ntrees : 2000 / shrinkage : 0.05 / n.minobsinnode : 10 / interaction.depth : 5 / rmse : 25048.87 -> LB : 0.12840
+# ntrees : 1600 / shrinkage : 0.01 / n.minobsinnode : 20 / interaction.depth : 10 / rmse : 25048.87 -> LB : 0.12655
+# ntrees : 1500 / shrinkage : 0.01 / n.minobsinnode : 19 / interaction.depth : 48 / rmse : 23518.88 -> LB : 0.12737
+```
+
+#### "RMSE" 최소값인 Hyper Parameter 값을 불러와서 예측에 실행
+
+```{r}
+ntreesNum <- rmseErrorsHyperparameters_gbm[nrow(rmseErrorsHyperparameters_gbm), 2]
+shrinkage_num <- rmseErrorsHyperparameters_gbm[nrow(rmseErrorsHyperparameters_gbm), 3]
+n.minobsinnode_num <- rmseErrorsHyperparameters_gbm[nrow(rmseErrorsHyperparameters_gbm), 4]
+interaction.depth_num <- rmseErrorsHyperparameters_gbm[nrow(rmseErrorsHyperparameters_gbm), 5]
+
+gbmModel = gbm(formula = SalePrice ~ .,
+			   data = train_xy,
+			   n.trees = ntreesNum, # number of trees
+			   shrinkage = shrinkage_num, # shrinkage or learning rate, 0.001 to 0.1 usually work
+			   n.minobsinnode = n.minobsinnode_num, # minimum total weight needed in each node
+			   interaction.depth = interaction.depth_num, # 1: additive model, 2: two-way interactions, etc.
+			   cv.folds = 5, # 5-fold cross-validation
+			   distribution = "gaussian",
+			   verbose = TRUE)
+
+### prediction_train all result save
+pred <- data.frame(test_id, gbm_pred <- predict(object = gbmModel, newdata = test_x, n.trees = ntreesNum))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```

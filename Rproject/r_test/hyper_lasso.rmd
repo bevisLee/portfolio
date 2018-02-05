@@ -1,0 +1,193 @@
+---
+title: "House Price Advanced Regression Hyper Parameters LASSO"
+author: "이춘호"
+date: "2017년 10월 28일"
+output: html_document
+---
+
+---
+## 1. 데이터 준비
+```{r}
+x.train <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/train_eda.csv")
+
+x.test <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/test_eda.csv")
+
+x.train <- x.train[, -1]
+x.test <- x.test[, -1]
+
+if (!require("dplyr")) { install.packages("dplyr") }
+
+SalePrice <- x.train[, 82]
+
+train_df_model <- x.train[, 1:81]
+test_df <- x.test
+test_id <- c(1461:2919)
+
+train_test <- bind_rows(train_df_model, test_df) ## 합치면서 character 컬럼이 생김
+ntrain <- nrow(train_df_model)
+
+features <- names(x.train)
+
+#convert character into factor : character 컬럼 factor 수정
+for (f in features) {
+	if (is.character(train_test[[f]])) {
+		levels = sort(unique(train_test[[f]]))
+		train_test[[f]] = as.integer(factor(train_test[[f]], levels = levels))
+	}
+}
+
+#splitting whole data back again
+train_x <- train_test %>% .[1:ntrain,]
+test_x <- train_test %>% .[(ntrain + 1):nrow(train_test),]
+
+train_xy <- cbind(train_x, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_xy$SalePrice, p = 0.7, list = FALSE)
+Training_xy <- train_xy[inTrain,]
+Validation_xy <- train_xy[-inTrain,]
+
+train_test_double <- train_test
+
+for (f in features) {
+	if (is.factor(train_test_double[[f]])) {
+		levels = sort(unique(train_test_double[[f]]))
+		train_test_double[[f]] = as.numeric(train_test_double[[f]], levels = levels)
+	}
+}
+
+#splitting whole data back again
+X_train <- train_test_double %>% .[1:ntrain,]
+X_test <- train_test_double %>% .[(ntrain + 1):nrow(train_test_double),]
+
+train_XY <- cbind(X_train, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_XY$SalePrice, p = 0.7, list = FALSE)
+Training_XY <- train_XY[inTrain,]
+Validation_XY <- train_XY[-inTrain,]
+```
+
+##  2. LASSO Hyper Parameters
+
+```{r}
+if (!require("glmnet")) { install.packages("glmnet") }
+if (!require("Metrics")) { install.packages("Metrics") }
+
+set.seed(123)
+```
+
+#### LASSO는 Hyper Parameter에 대한 자료가 없어, R 패키지 가이드 및 Fuction 설명 확인 후 수정값을 임의로 결정하여 진행
+
+* 초기값 RMSE
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* nfold - 3 : nfold는 3보다 커야함
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, nfolds = 3, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* nfold - 5
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, nfolds = 5, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* nfold - 10
+
+```{r}
+cv_lasso = cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, nfolds = 10, type.measure = "mse")
+
+preds_lasso <- predict(cv_lasso, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+
+rmse(Validation_XY$SalePrice, preds_lasso)
+```
+
+* 결과
+
+```{r}
+# 기본 : 31535.93
+# nfold - 3 추가 : 31535.93
+# nfold - 5 추가 : 32149.72
+# nfold - 10 추가 : 31846.18
+```
+
+#### nfold가 3일때 "RMSE"가 낮으므로, 3으로 고정하고, alpha 값 탐색
+
+```{r}
+alpha = seq(0, 1, by = 0.00001)
+
+head(alpha)
+```
+
+#### 세분화하여 최적화 과정이 시작되면, "RMSE" 최소의 값만 저장하도록 설정
+#### progress 를 사용하여, 진행율을 확인
+#### Hyper Parameter 탐색과정을 오래 걸리므로, slack과 같은 메신저와 연결하여, 완료되면 메시지 전송을 통해 이원화 작업을 추천
+
+* RMSE 최소 비교를 위해, 위에서 도출한 최소값을 입력하여, 그 보다 더 작은 RMSE 일때 저장하도록 설정
+
+```{r}
+library("progress")
+pb <- progress_bar$new(total = length(alpha))
+
+rmseErrorsHyperparameters_lasso <- data.frame()
+rmse = 31846.18
+for (i in 1:length(alpha)) {
+	alpha_num = alpha[i]
+	fit <- cv.glmnet(as.matrix(Training_XY[, -82]), Training_XY$SalePrice, alpha = alpha_num, nfolds = 3, type.measure = "mse")
+	preds_lasso <- predict(fit, newx = as.matrix(Validation_XY[, -82]), s = "lambda.min")
+	rmse1 <- rmse(Validation_XY$SalePrice, preds_lasso)
+	rmse = min(rmse, rmse1)
+
+	if (rmse == rmse1) {
+		rmseErrorsHyperparameters_lasso_1 <- data.frame(rmse, alpha_num)
+		rmseErrorsHyperparameters_lasso <- rbind(rmseErrorsHyperparameters_lasso, rmseErrorsHyperparameters_lasso_1)
+		print(rmseErrorsHyperparameters_lasso_1)
+	}
+	pb$tick()
+}
+rmseErrorsHyperparameters_lasso
+```
+
+* 결과
+
+```{r}
+# rmse alpha_num
+# 29961.57         0
+# 29771.29     1e-05
+# 29089.44     3e-05
+# 29038.22   0.00012
+```
+
+#### "RMSE" 최소값인 Hyper Parameter 값을 불러와서 예측에 실행
+
+```{r}
+alpha_num = 0.00012
+cv_lasso = cv.glmnet(as.matrix(X_train), SalePrice, alpha = alpha_num, nfolds = 3, type.measure = "mse")
+
+### prediction result save
+pred <- data.frame(test_id, lasso_pred <- predict(cv_lasso, newx = as.matrix(X_test),
+	s = "lambda.min"))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```

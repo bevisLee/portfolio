@@ -1,0 +1,150 @@
+---
+title: "House Price Advanced Regression Hyper Parameters RandomForest"
+author: "이춘호"
+date: "2017년 10월 28일"
+output: html_document
+---
+
+---
+## 1. 데이터 준비
+```{r}
+x.train <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/train_eda.csv")
+
+x.test <- read.csv("C:/Users/bevis/Downloads/House_Prices_Advanced_Regression_Techniques/test_eda.csv")
+
+x.train <- x.train[, -1]
+x.test <- x.test[, -1]
+
+if (!require("dplyr")) { install.packages("dplyr") }
+
+SalePrice <- x.train[, 82]
+
+train_df_model <- x.train[, 1:81]
+test_df <- x.test
+test_id <- c(1461:2919)
+
+train_test <- bind_rows(train_df_model, test_df) ## 합치면서 character 컬럼이 생김
+ntrain <- nrow(train_df_model)
+
+features <- names(x.train)
+
+#convert character into factor : character 컬럼 factor 수정
+for (f in features) {
+	if (is.character(train_test[[f]])) {
+		levels = sort(unique(train_test[[f]]))
+		train_test[[f]] = as.integer(factor(train_test[[f]], levels = levels))
+	}
+}
+
+#splitting whole data back again
+train_x <- train_test %>% .[1:ntrain,]
+test_x <- train_test %>% .[(ntrain + 1):nrow(train_test),]
+
+train_xy <- cbind(train_x, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_xy$SalePrice, p = 0.7, list = FALSE)
+Training_xy <- train_xy[inTrain,]
+Validation_xy <- train_xy[-inTrain,]
+
+train_test_double <- train_test
+
+for (f in features) {
+	if (is.factor(train_test_double[[f]])) {
+		levels = sort(unique(train_test_double[[f]]))
+		train_test_double[[f]] = as.numeric(train_test_double[[f]], levels = levels)
+	}
+}
+
+#splitting whole data back again
+X_train <- train_test_double %>% .[1:ntrain,]
+X_test <- train_test_double %>% .[(ntrain + 1):nrow(train_test_double),]
+
+train_XY <- cbind(X_train, SalePrice)
+
+if (!require("caret")) { install.packages("caret") }
+set.seed(222)
+
+inTrain <- createDataPartition(y = train_XY$SalePrice, p = 0.7, list = FALSE)
+Training_XY <- train_XY[inTrain,]
+Validation_XY <- train_XY[-inTrain,]
+```
+
+##  2. RandomForest Hyper Parameters
+
+```{r}
+if (!require("randomForest")) { install.packages("randomForest") }
+if (!require("caret")) { install.packages("caret") }
+if (!require("Metrics")) { install.packages("Metrics") }
+```
+
+* 참고 - https://machinelearningmastery.com/tune-machine-learning-algorithms-in-r/
+	+ mtry : 각 분할에서 후보로 무작위로 샘플링 된 변수의 수 -> 기본 권장값 : mtry = sqrt(ncol(변수)))
+	+ ntree : 성장할 나무의 수. -> ntree = 500
+
+#### 초기에는 구간을 간단하게 설정하여, 세분화할 구간을 선택
+#### 범위가 세분화 될 수록 searchGridSubCol 값이 커지므로, 초반에는 범위를 넓게하여 차츰 좁히는 방식 추천 
+
+* 구간 설정
+```{r}
+searchGridSubCol <- exsearchGridSubCol <- expand.grid(mtry_num = seq(30, 1, by = -1), ntree = seq(3000, 100, by = -100))
+
+head(searchGridSubCol)
+```
+
+#### 세분화하여 최적화 과정이 시작되면, "RMSE" 최소의 값만 저장하도록 설정
+#### progress 를 사용하여, 진행율을 확인
+#### Hyper Parameter 탐색과정을 오래 걸리므로, slack과 같은 메신저와 연결하여, 완료되면 메시지 전송을 통해 이원화 작업을 추천
+
+```{r}
+# ntree 100:3000
+rmseErrorsHyperparameters_rf <- data.frame()
+rmse = 30000
+for (i in 1:nrow(searchGridSubCol)) {
+
+	mtry_num <- searchGridSubCol[i, 1]
+	ntree_num <- searchGridSubCol[i, 2]
+
+	fit <- randomForest(SalePrice ~ ., data = Training_xy, mtry = mtry_num, ntree = ntree_num)
+
+	preds_rf <- predict(fit, newdata = Validation_xy)
+	rmse1 <- rmse(Validation_xy$SalePrice, preds_rf)
+	rmse = min(rmse, rmse1)
+
+	if (rmse == rmse1) {
+		rmseErrorsHyperparameters_rf_1 <- data.frame(rmse1, mtry_num, ntree_num)
+		colnames(rmseErrorsHyperparameters_rf_1) <- c("rmse", "mtry_num", "ntree_num")
+		rmseErrorsHyperparameters_rf <- rbind(rmseErrorsHyperparameters_rf, rmseErrorsHyperparameters_rf_1)
+		print(rmseErrorsHyperparameters_rf_1)
+	}
+}
+
+tail(rmseErrorsHyperparameters_rf,5)
+```
+
+* 결과
+	+ ntree를 100이하로 train할때 "RMSE"는 감소하였으나, LB Score는 증가하여, LB Score 기준으로 가장 낮은 Parameter 적용
+```{r}
+# mtry : 5 / ntree : 500 / rmse : 33889.03 -> LB : 0.16743
+# mtry : 29 / ntree : 1200 / rmse : 28184.84 -> LB : 0.14645
+# mtry : 31 / ntree : 1000 / rmse : 25657.48 -> LB : 0.14595
+# mtry : 28 / ntree : 800 / rmse : 24316.66 -> LB : 0.14295
+# mtry : 21 / ntree : 99 / rmse : 23701.38 -> LB : 0.14523
+# mtry : 24 / ntree : 87 / rmse : 23260.80 -> LB : 0.14424
+```
+
+#### "RMSE" 최소값인 Hyper Parameter 값을 불러와서 예측에 실행
+
+```{r}
+mtry_num <- rmseErrorsHyperparameters_rf[nrow(rmseErrorsHyperparameters_rf),2]
+ntree_num <- rmseErrorsHyperparameters_rf[nrow(rmseErrorsHyperparameters_rf), 3]
+
+rf_model <- randomForest(SalePrice ~ ., data = train_xy, mtry = mtry_num, ntree = ntree_num)
+
+pred <- data.frame(test_id, rf_pred <- predict(rf_model, test_x))
+colnames(pred) <- c("Id", "SalePrice")
+
+head(pred)
+```
